@@ -1,0 +1,751 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [postgis]
+}
+
+// ─── Enums ───────────────────────────────────────────────────────────────────
+
+enum Role {
+  SEEKER
+  OWNER
+  BROKER
+  PROVIDER
+  ADMIN
+}
+
+enum PropertyType {
+  FLAT
+  PG
+  HOSTEL
+  VILLA
+  COMMERCIAL
+}
+
+enum PropertyStatus {
+  DRAFT
+  PENDING_REVIEW
+  ACTIVE
+  RENTED
+  SOLD
+  REJECTED
+  INACTIVE
+}
+
+enum ListingFor {
+  RENT
+  SALE
+  BOTH
+}
+
+enum FurnishingStatus {
+  FULLY_FURNISHED
+  SEMI_FURNISHED
+  UNFURNISHED
+}
+
+enum GenderPreference {
+  MALE
+  FEMALE
+  ANY
+}
+
+enum BookingType {
+  VISIT
+  RENT_APPLICATION
+  BUY_INTENT
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  NO_SHOW
+}
+
+enum LeaseStatus {
+  PENDING
+  ACTIVE
+  EXPIRED
+  TERMINATED
+}
+
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  PAID
+  FAILED
+  REFUNDED
+  OVERDUE
+}
+
+enum MaintenanceCategory {
+  PLUMBING
+  ELECTRICAL
+  CARPENTRY
+  CLEANING
+  PAINTING
+  APPLIANCE
+  PEST_CONTROL
+  OTHER
+}
+
+enum MaintenanceStatus {
+  OPEN
+  ASSIGNED
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum MaintenancePaidBy {
+  OWNER
+  TENANT
+  INCLUDED
+}
+
+enum ServiceCategory {
+  COOK
+  MAID
+  SECURITY
+  LAUNDRY
+  CYLINDER
+  PACKERS_MOVERS
+  HOME_CLEANING
+  ELECTRICIAN
+  PLUMBER
+  ARCHITECT
+  INTERIOR_DESIGNER
+  PHOTOGRAPHER
+  VASTU
+  OTHER
+}
+
+enum ServiceBookingStatus {
+  PENDING
+  CONFIRMED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum VerificationStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  VERIFIED
+  FAILED
+}
+
+enum NudgeStatus {
+  SENT
+  CLICKED
+  IGNORED
+  MUTED
+}
+
+enum AuditAction {
+  LISTING_APPROVED
+  LISTING_REJECTED
+  BROKER_ASSIGNED
+  BROKER_REASSIGNED
+  RENT_PAID
+  RENT_OVERDUE
+  PAYOUT_TRIGGERED
+  LEASE_CREATED
+  LEASE_TERMINATED
+  VERIFICATION_PASSED
+  VERIFICATION_FAILED
+  USER_ROLE_CHANGED
+  CONFIG_CHANGED
+  DISPUTE_OPENED
+  DISPUTE_RESOLVED
+  NUDGE_SENT
+  CONTACT_REQUEST
+  LISTING_DELETED
+}
+
+enum DepositStatus {
+  HELD
+  PARTIALLY_RELEASED
+  RELEASED
+  FORFEITED
+}
+
+// ─── Core: Users ─────────────────────────────────────────────────────────────
+
+model User {
+  id        String   @id @default(cuid())
+  phone     String   @unique
+  email     String?  @unique
+  name      String?
+  avatarUrl String?
+  role      Role     @default(SEEKER)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Profile extras (flexible per role)
+  aadhaarVerified    Boolean            @default(false)
+  verificationStatus VerificationStatus @default(NOT_STARTED)
+
+  // OTP auth
+  otpHash      String?
+  otpExpiresAt DateTime?
+  otpAttempts  Int       @default(0)
+
+  // Relations
+  refreshTokens       RefreshToken[]
+  ownedProperties     Property[]           @relation("PropertyOwner")
+  brokerProfile       BrokerProfile?
+  providerProfile     ProviderProfile?
+  bookings            Booking[]            @relation("SeekerBookings")
+  tenantLeases        Lease[]              @relation("TenantLeases")
+  rentPayments        RentPayment[]
+  maintenanceRequests MaintenanceRequest[] @relation("TenantMaintenance")
+  serviceBookings     ServiceBooking[]     @relation("SeekerServiceBookings")
+  propertyViews       PropertyView[]
+  savedProperties     SavedProperty[]
+  auditLogs           AuditLog[]           @relation("AuditUser")
+  notifications       Notification[]
+  contactRequests     ContactRequest[]
+
+  @@index([phone])
+  @@index([role])
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+// ─── Broker Profile ───────────────────────────────────────────────────────────
+
+model BrokerProfile {
+  id              String   @id @default(cuid())
+  userId          String   @unique
+  reraNumber      String?
+  experienceYears Int      @default(0)
+  bio             String?
+  serviceAreas    String[] // locality names
+  isVerified      Boolean  @default(false)
+  isActive        Boolean  @default(true)
+  rating          Float    @default(0)
+  totalDeals      Int      @default(0)
+  totalReviews    Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user               User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assignedProperties BrokerAssignment[]
+  bookings           Booking[]
+  leases             Lease[]
+
+  @@map("broker_profiles")
+}
+
+// ─── Properties ───────────────────────────────────────────────────────────────
+
+model Property {
+  id          String         @id @default(cuid())
+  ownerId     String
+  type        PropertyType
+  listingFor  ListingFor
+  status      PropertyStatus @default(DRAFT)
+  title       String
+  description String
+
+  // Location — stored as PostGIS point for geo queries
+  // We store both display (500m fuzzy) and exact addresses separately
+  city           String  @default("Hyderabad")
+  locality       String
+  addressDisplay String // shown publicly: "Near Gachibowli, Hyderabad"
+  addressFull    String // revealed only after confirmed visit
+  pincode        String?
+  latitude       Float
+  longitude      Float
+
+  // Pricing
+  monthlyRent       Int?
+  salePrice         Int?
+  depositMonths     Int  @default(2)
+  depositAmount     Int?
+  maintenanceCharge Int? @default(0)
+
+  // Property details
+  bhk              Int?
+  bathrooms        Int?
+  totalAreaSqft    Int?
+  carpetAreaSqft   Int?
+  floorNumber      Int?
+  totalFloors      Int?
+  ageYears         Int?
+  facing           String?
+  furnishing       FurnishingStatus @default(UNFURNISHED)
+  parkingAvailable Boolean          @default(false)
+  petFriendly      Boolean          @default(false)
+
+  // For PG/Hostel
+  genderPreference GenderPreference @default(ANY)
+  totalBeds        Int?
+  availableBeds    Int?
+  mealsIncluded    Boolean          @default(false)
+  mealDetails      String?
+
+  // Media
+  photos       String[] // R2 URLs
+  videoUrl     String?
+  floorPlanUrl String?
+
+  // Amenities stored as array of strings
+  amenities String[]
+
+  // Rules
+  rules            String?
+  preferredTenants String?
+
+  // Admin
+  rejectionReason String?
+  approvedAt      DateTime?
+  approvedBy      String?
+
+  // Pending edit (live listing stays unchanged until admin approves edit)
+  pendingUpdate  Json?    // proposed field changes as JSON
+  hasPendingEdit Boolean  @default(false)
+
+  // Soft archive — property removed from search but history retained
+  isArchived   Boolean  @default(false)
+  archivedAt   DateTime?
+
+  // Onboarding fee (if enabled)
+  onboardingFeePaid   Boolean @default(false)
+  onboardingFeeAmount Int?
+  onboardingPaymentId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  owner               User                 @relation("PropertyOwner", fields: [ownerId], references: [id])
+  brokerAssignments   BrokerAssignment[]
+  pgRooms             PgRoom[]
+  bookings            Booking[]
+  leases              Lease[]
+  maintenanceRequests MaintenanceRequest[]
+  views               PropertyView[]
+  savedBy             SavedProperty[]
+  nudges              LeadNudge[]
+  contactRequests     ContactRequest[]
+
+  @@index([locality])
+  @@index([status])
+  @@index([type])
+  @@index([listingFor])
+  @@index([ownerId])
+  @@map("properties")
+}
+
+model PgRoom {
+  id               String           @id @default(cuid())
+  propertyId       String
+  roomName         String
+  capacity         Int
+  availableBeds    Int
+  monthlyRent      Int
+  depositAmount    Int
+  amenities        String[]
+  photos           String[]
+  genderPreference GenderPreference @default(ANY)
+  isActive         Boolean          @default(true)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@index([propertyId])
+  @@map("pg_rooms")
+}
+
+model BrokerAssignment {
+  id               String   @id @default(cuid())
+  propertyId       String
+  brokerProfileId  String
+  isPrimary        Boolean  @default(true)
+  commissionType   String   @default("PERCENTAGE") // PERCENTAGE | FIXED
+  commissionValue  Float    @default(50) // 50% of first month's rent
+  dealsClosedCount Int      @default(0)
+  totalEarned      Int      @default(0)
+  assignedAt       DateTime @default(now())
+  isActive         Boolean  @default(true)
+
+  property      Property      @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  brokerProfile BrokerProfile @relation(fields: [brokerProfileId], references: [id])
+
+  @@unique([propertyId, brokerProfileId])
+  @@index([propertyId])
+  @@index([brokerProfileId])
+  @@map("broker_assignments")
+}
+
+// ─── Bookings (visits + applications) ────────────────────────────────────────
+
+model Booking {
+  id              String        @id @default(cuid())
+  propertyId      String
+  seekerId        String
+  brokerProfileId String?
+  type            BookingType
+  status          BookingStatus @default(PENDING)
+  scheduledAt     DateTime?
+  notes           String?
+  cancelReason    String?
+  completedAt     DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  property      Property       @relation(fields: [propertyId], references: [id])
+  seeker        User           @relation("SeekerBookings", fields: [seekerId], references: [id])
+  brokerProfile BrokerProfile? @relation(fields: [brokerProfileId], references: [id])
+
+  @@index([seekerId])
+  @@index([propertyId])
+  @@index([brokerProfileId])
+  @@map("bookings")
+}
+
+// ─── Leases ───────────────────────────────────────────────────────────────────
+
+model Lease {
+  id              String      @id @default(cuid())
+  propertyId      String
+  tenantId        String
+  brokerProfileId String?
+  status          LeaseStatus @default(PENDING)
+
+  startDate     DateTime
+  endDate       DateTime
+  monthlyRent   Int
+  depositAmount Int
+  depositStatus DepositStatus @default(HELD)
+
+  // Razorpay references
+  depositPaymentId    String?
+  depositVirtualAccId String?
+
+  // Signed agreement
+  agreementUrl   String?
+  tenantSignedAt DateTime?
+  ownerSignedAt  DateTime?
+
+  // Verification
+  verificationStatus    VerificationStatus @default(NOT_STARTED)
+  verificationReportUrl String?
+  onGridRequestId       String?
+
+  terminationReason     String?
+  terminatedAt          DateTime?
+  depositReturnedAmount Int?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  property      Property       @relation(fields: [propertyId], references: [id])
+  tenant        User           @relation("TenantLeases", fields: [tenantId], references: [id])
+  brokerProfile BrokerProfile? @relation(fields: [brokerProfileId], references: [id])
+  rentPayments  RentPayment[]
+
+  @@index([propertyId])
+  @@index([tenantId])
+  @@map("leases")
+}
+
+// ─── Rent Payments ────────────────────────────────────────────────────────────
+
+model RentPayment {
+  id       String        @id @default(cuid())
+  leaseId  String
+  tenantId String
+  amount   Int
+  dueDate  DateTime
+  paidAt   DateTime?
+  status   PaymentStatus @default(PENDING)
+
+  // Razorpay
+  razorpayOrderId   String?
+  razorpayPaymentId String?
+  razorpayRouteId   String?
+
+  // Split amounts (calculated at payment time)
+  platformFee  Int @default(0)
+  ownerPayout  Int @default(0)
+  brokerPayout Int @default(0)
+
+  ownerSettledAt DateTime?
+  remindersSent  Int       @default(0)
+  lastReminderAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lease  Lease @relation(fields: [leaseId], references: [id])
+  tenant User  @relation(fields: [tenantId], references: [id])
+
+  @@index([leaseId])
+  @@index([tenantId])
+  @@index([dueDate])
+  @@index([status])
+  @@map("rent_payments")
+}
+
+// ─── Maintenance ──────────────────────────────────────────────────────────────
+
+model MaintenanceRequest {
+  id          String              @id @default(cuid())
+  propertyId  String
+  tenantId    String
+  category    MaintenanceCategory
+  description String
+  photos      String[]
+  priority    String              @default("NORMAL") // LOW | NORMAL | HIGH | URGENT
+  status      MaintenanceStatus   @default(OPEN)
+  paidBy      MaintenancePaidBy   @default(OWNER)
+
+  assignedProviderId String?
+  assignedAt         DateTime?
+  resolvedAt         DateTime?
+  resolutionNotes    String?
+  resolutionPhotos   String[]
+
+  estimatedCost Int?
+  actualCost    Int?
+
+  paymentId     String?
+  paymentStatus PaymentStatus @default(PENDING)
+
+  tenantRating Int?
+  tenantReview String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  property Property         @relation(fields: [propertyId], references: [id])
+  tenant   User             @relation("TenantMaintenance", fields: [tenantId], references: [id])
+  provider ProviderProfile? @relation(fields: [assignedProviderId], references: [id])
+
+  @@index([propertyId])
+  @@index([tenantId])
+  @@index([status])
+  @@map("maintenance_requests")
+}
+
+// ─── Service Providers & Marketplace ─────────────────────────────────────────
+
+model ProviderProfile {
+  id              String          @id @default(cuid())
+  userId          String          @unique
+  category        ServiceCategory
+  subcategory     String?
+  bio             String?
+  experienceYears Int             @default(0)
+  hourlyRate      Int?
+  packageDetails  String?
+  areasServed     String[]
+  portfolioUrls   String[]
+  rating          Float           @default(0)
+  totalJobs       Int             @default(0)
+  totalReviews    Int             @default(0)
+  isVerified      Boolean         @default(false)
+  isActive        Boolean         @default(true)
+  availableDays   String[] // ["MON","TUE","WED",...]
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  user                User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  serviceBookings     ServiceBooking[]
+  maintenanceRequests MaintenanceRequest[]
+  reviews             ProviderReview[]
+
+  @@index([category])
+  @@index([areasServed])
+  @@map("provider_profiles")
+}
+
+model ServiceBooking {
+  id                String               @id @default(cuid())
+  providerId        String
+  seekerId          String
+  propertyId        String?
+  category          ServiceCategory
+  description       String?
+  scheduledAt       DateTime
+  status            ServiceBookingStatus @default(PENDING)
+  amount            Int?
+  platformFee       Int                  @default(0)
+  providerPayout    Int                  @default(0)
+  razorpayPaymentId String?
+  completedAt       DateTime?
+  cancelReason      String?
+  seekerRating      Int?
+  seekerReview      String?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+
+  provider ProviderProfile @relation(fields: [providerId], references: [id])
+  seeker   User            @relation("SeekerServiceBookings", fields: [seekerId], references: [id])
+
+  @@index([providerId])
+  @@index([seekerId])
+  @@map("service_bookings")
+}
+
+model ProviderReview {
+  id         String   @id @default(cuid())
+  providerId String
+  reviewerId String
+  rating     Int
+  review     String?
+  createdAt  DateTime @default(now())
+
+  provider ProviderProfile @relation(fields: [providerId], references: [id])
+
+  @@index([providerId])
+  @@map("provider_reviews")
+}
+
+// ─── Lead & Nudge System ─────────────────────────────────────────────────────
+
+model PropertyView {
+  id          String   @id @default(cuid())
+  propertyId  String
+  userId      String? // null for anonymous
+  sessionId   String? // for anonymous tracking
+  source      String? // search | map | seo | direct | nudge
+  durationSec Int?
+  createdAt   DateTime @default(now())
+
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  user     User?    @relation(fields: [userId], references: [id])
+
+  @@index([propertyId])
+  @@index([userId])
+  @@index([createdAt])
+  @@map("property_views")
+}
+
+model LeadNudge {
+  id         String      @id @default(cuid())
+  propertyId String
+  seekerId   String
+  channel    String // whatsapp | push | in_app
+  status     NudgeStatus @default(SENT)
+  sentAt     DateTime    @default(now())
+  clickedAt  DateTime?
+  mutedAt    DateTime?
+
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@unique([propertyId, seekerId, channel])
+  @@index([propertyId])
+  @@index([seekerId])
+  @@map("lead_nudges")
+}
+
+model ContactRequest {
+  id         String   @id @default(cuid())
+  userId     String
+  propertyId String
+  createdAt  DateTime @default(now())
+
+  user     User     @relation(fields: [userId], references: [id])
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, propertyId])
+  @@index([propertyId])
+  @@index([createdAt])
+  @@map("contact_requests")
+}
+
+// ─── Saved Properties ─────────────────────────────────────────────────────────
+
+model SavedProperty {
+  id         String   @id @default(cuid())
+  userId     String
+  propertyId String
+  createdAt  DateTime @default(now())
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, propertyId])
+  @@map("saved_properties")
+}
+
+// ─── Notifications ────────────────────────────────────────────────────────────
+
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  type      String // NUDGE | RENT_REMINDER | MAINTENANCE_UPDATE | VISIT_REMINDER | etc.
+  title     String
+  body      String
+  data      Json? // extra context (propertyId, bookingId, etc.)
+  isRead    Boolean   @default(false)
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([isRead])
+  @@map("notifications")
+}
+
+// ─── Audit Logs ───────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id         String      @id @default(cuid())
+  userId     String?
+  role       Role?
+  action     AuditAction
+  entityType String // "Property" | "Lease" | "RentPayment" | etc.
+  entityId   String
+  oldValue   Json?
+  newValue   Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime    @default(now())
+
+  user User? @relation("AuditUser", fields: [userId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([userId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ─── Platform Config (feature flags + fee settings) ──────────────────────────
+
+model PlatformConfig {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String
+  type      String   @default("string") // string | boolean | number
+  label     String?
+  updatedBy String?
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  @@map("platform_config")
+}
